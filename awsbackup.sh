@@ -10,7 +10,6 @@
 # as published by Sam Hocevar. See http://www.wtfpl.net/ for more details.
 #
 
-
 # -----------------------------------------------------------------------------
 # TODO: adjust everything below for your personal needs
 PASSWORD_LOCATION='/tmp/backup-password'  # for convenience, encryption password can be (temporarily) stored in a file.
@@ -25,25 +24,25 @@ STORAGE_CLASS="DEEP_ARCHIVE"              # AWS S3 storage class, DEEP_ARCHIVE i
 # For initial setup, run
 #     echo "backupsalt" | openssl enc -e -nosalt -aes-256-cbc -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" | xxd -p 
 # and copy 4 hexadecimal characters out of it (can be copied from inside the middle, too).
-# This will catch 1-(1-1/16**4)**(32-4) > 99.9% of the wrong passwords while not giving any advantage for a brute-force attack.
+# This will catch 1-(32-4)/16**4 > 99.9% of the wrong passwords while not giving any advantage for a brute-force attack.
 PASSWORD_HASH='b4e4' 
 # TODO: adjust everything above
 # -----------------------------------------------------------------------------
 
-# fail on all errors, do not change!
+# fail on all errors
 set -e 
 
 # This helper function reads the password either from a file, or from stdin.
 function getPassword {
     if [ -f "$PASSWORD_LOCATION" ]; then
-        pass=$(cat "$PASSWORD_LOCATION")
+        pass=`cat "$PASSWORD_LOCATION"`
     else
         echo -n "Enter password: "
         read pass
     fi
     # check password
-        echo "FATAL ERROR: Password wrong, exit."
     if [[ ! $(echo "backupsalt" | openssl enc -e -nosalt -aes-256-cbc -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" | xxd -p ) =~ "$PASSWORD_HASH" ]]; then
+        echo "FATAL ERROR: Password wrong, exit."
         exit 1
     fi
 }
@@ -57,14 +56,13 @@ function decryptString {
     echo -n "$1" | tr '_-' '/+' | openssl enc -d -nosalt -aes-256-cbc -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" -a -A 
 }
 
-# check local archives for bitrot by calculating SHA256 sum and 
-# comparing against SHA256 hash calculated during creation
+# check local archives for bitrot by calculating SHA256 sum and comparing against SHA256 hash calculated during creation
 function localVerify {
     echo "local verification has started, please be patient"
     cd "$LOCAL"/ >/dev/null
     sha256sum -c --quiet SHA256.txt
     cd - >/dev/null
-    # sha256sum will have aborted this script otherwise (set -e)
+    # sha256sum will have aborted this script otherwise (set -e) if there has been an error
     echo "SUCCESS: local verification did not detect errors"
 }
 
@@ -94,7 +92,7 @@ function etagHash {
 function add {
     # check if folder exists
     if [ ! -d "$1" ]; then
-        echo "FATAL ERROR: Directory '$1' does not exist and can not get archived!" 
+        echo "FATAL ERROR: Directory '$1' does not exist and can not get archived!"
         exit 1
     fi
     # check if name has format YYYY-MM-DD_alphanumeric_description
@@ -110,12 +108,12 @@ function add {
 
     # get encryption password
     getPassword
-    
-    # tar, compress, encrypt, write and checksum archive 
+
+    # tar, compress, encrypt, write and checksum archive
     # workaround with temporary directory because file inside TAR archive must be named accordingly
     tmp=$(mktemp -d /tmp/awsbackup.tmp.folder.XXXXXXXX)
     ln -s "$(pwd)"/"$1" "$tmp"/"$2"
-    cd "$tmp" 
+    cd "$tmp"
     sha2=$(tar cvh "$2" | xz -9e -C sha256 | openssl enc -e -salt -aes-256-ctr -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" | tee "$LOCAL/$FOLDER/$2.tar.xz.enc" | sha256sum | cut --bytes=-64)
     unlink "$tmp"/"$2"
     rmdir "$tmp"
@@ -129,6 +127,7 @@ function add {
     # display success
     echo "SUCCESS: Created local copy. Please run \"cloud-sync\" command now."
 }
+
 # This function does
 #   - upload local archives which are not already stored in the cloud
 #   - warn, if there are any files in the cloud where we do not have a local copy
@@ -140,7 +139,7 @@ function cloudsync {
         if [[ ! -s "$LOCAL/$name" ]]; then echo "FATAL ERROR: file $LOCAL/$name invalid!"; exit 1; fi
         filename=$(basename "$name")
         encfilename=$(encryptString "$filename")
-        etagAWS=$(cat "$LOCAL"/list-objects.txt | jq ".Contents[] | select(.Key|test(\"$FOLDER/$encfilename\")) | .ETag" | tr -d '"\\ ') 
+        etagAWS=$(cat "$LOCAL"/list-objects.txt | jq ".Contents[] | select(.Key|test(\"$FOLDER/$encfilename\")) | .ETag" | tr -d '"\\ ')
         if [[ -z "$etagAWS" ]]; then
             echo "TODO: $filename is missing in cloud, will be uploaded."
             aws s3 cp --storage-class "$STORAGE_CLASS" "$LOCAL/$FOLDER/$filename" "s3://$BUCKET/$FOLDER/$encfilename"
@@ -160,7 +159,6 @@ function cloudsync {
     cat "$LOCAL"/list-objects.txt | jq ".Contents[] | select(.Key|test(\"$FOLDER/\")) | .ETag" | tr -d '"\\ ' | while read -r etag; do
         if ! grep -Fq "$etag" "$LOCAL/ETAGS.txt"; then echo "FATAL ERROR: Etag $etag exists in cloud, but not in local copy!"; exit 1; fi
     done
-
     echo "SUCCESS: Cloud and local files are in sync."
 }
 
@@ -170,6 +168,35 @@ function localverify {
     sha256sum -w -c SHA256.txt
     cd - >/dev/null
     echo "SUCCESS: All files in $LOCAL are ok!"
+}
+
+function list {
+    # check, if we can unpack something
+    name="${1%%.tar.xz.enc}"
+    name="${name##$LOCAL\/$FOLDER/}"
+    if [ ! -f "$LOCAL/$FOLDER/$name.tar.xz.enc" ]; then echo "FATAL ERROR: file $LOCAL/$FOLDER/$name.tar.xz.enc does not exist!"; exit 1; fi
+
+    getPassword
+    cat "$LOCAL/$FOLDER/$name.tar.xz.enc" | openssl enc -d -salt -aes-256-ctr -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" | unxz | tar tv
+}
+
+function unpack {
+    # check, if we can unpack something
+    name="${1%%.tar.xz.enc}"
+    name="${name##$LOCAL\/$FOLDER/}"
+    if [ ! -f "$LOCAL/$FOLDER/$name.tar.xz.enc" ]; then echo "FATAL ERROR: file $LOCAL/$FOLDER/$name.tar.xz.enc does not exist!"; exit 1; fi
+
+    getPassword
+    cd /tmp
+    cat "$LOCAL/$FOLDER/$name.tar.xz.enc" | openssl enc -d -salt -aes-256-ctr -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" | unxz | tar xv
+    echo "SUCCESS: unpacking successful, please look at $LOCAL/$FOLDER/$name.tar.xz.enc!"
+}
+
+function list-all {
+	cd "$LOCAL/$FOLDER/"
+	for i in *.tar.xz.enc; do
+		list "$i"
+	done
 }
 
 function usage {
@@ -186,7 +213,13 @@ function usage {
     echo "   store-password"
     echo "     - store password unsafe (!) until next reboot"
     echo "   remove-password"
-    echo "     - remove stored password" 
+    echo "     - remove stored password"
+    echo "   unpack 1999-01-XX_Pictures_Vacation"
+    echo "     - decrypt and unpack the archive to /tmp/"
+    echo "   list 1999-01-XX_Pictures_Vacation"
+    echo "     - decrypt and list contents"
+    echo "   list-all"
+    echo "     - decrypt and list contents of all archives"
     exit 1
 }
 
@@ -196,6 +229,9 @@ local-verify) localverify ;;
 cloud-sync) cloudsync;;
 store-password) getPassword; echo "$pass" > "$PASSWORD_LOCATION" ;;
 remove-password) rm -vf "$PASSWORD_LOCATION" ;;
+unpack) unpack "$2" ;;
+list) list "$2" ;;
+list-all) list-all ;;
 *) usage ;;
 esac
 
