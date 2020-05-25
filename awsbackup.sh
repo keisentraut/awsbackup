@@ -2,7 +2,7 @@
 #
 # ./awsbackup.sh - personal backup with AWS S3 Glacier Deep Archive
 #
-# written by Klaus Eisentraut, May 2019
+# written by Klaus Eisentraut, May 2019, last update May 2020
 #
 # This work is free. It comes without any warranty, to the extent permissible
 # by applicable law. You can redistribute it and/or modify it under the
@@ -14,23 +14,23 @@
 # TODO: adjust everything below for your personal needs
 PASSWORD_LOCATION='/tmp/backup-password'  # for convenience, encryption password can be (temporarily) stored in a file.
 ITERATIONS=1000000                        # number of PBKDF2 iterations
-BUCKET="my-bucket"                        # name of aws bucket 
+BUCKET="my-bucket"                        # name of aws bucket
 LOCAL="/mnt/backup"                       # path to directory where local copy of archives is stored
 FOLDER="awsbackup"                        # name of subfolder in bucket and local folder, this is where the actual data goes
 MULTIPART_CHUNKSIZE=$((8*1024*1024))      # must be identical with your AWS settings! Default is 8MiB for both settings.
 MULTIPART_THRESHOLD=$((8*1024*1024))
-STORAGE_CLASS="DEEP_ARCHIVE"              # AWS S3 storage class, DEEP_ARCHIVE is the cheapest for long-term archiving 
+STORAGE_CLASS="DEEP_ARCHIVE"              # AWS S3 storage class, DEEP_ARCHIVE is the cheapest for long-term archiving
 # We need to catch wrong passwords because a backup with a wrong encryption password is useless.
 # For initial setup, run
-#     echo "backupsalt" | openssl enc -e -nosalt -aes-256-cbc -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" | xxd -p 
+#     echo "backupsalt" | openssl enc -e -nosalt -aes-256-cbc -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" | xxd -p
 # and copy 4 hexadecimal characters out of it (can be copied from inside the middle, too).
 # This will catch 1-(32-4)/16**4 > 99.9% of the wrong passwords while not giving any advantage for a brute-force attack.
-PASSWORD_HASH='b4e4' 
+PASSWORD_HASH='b4e4'
 # TODO: adjust everything above
 # -----------------------------------------------------------------------------
 
 # fail on all errors
-set -e 
+set -e
 
 # This helper function reads the password either from a file, or from stdin.
 function getPassword {
@@ -53,7 +53,7 @@ function encryptString {
     echo -n "$1" | openssl enc -e -nosalt -aes-256-cbc -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" -a -A | tr '/+' '_-'
 }
 function decryptString {
-    echo -n "$1" | tr '_-' '/+' | openssl enc -d -nosalt -aes-256-cbc -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" -a -A 
+    echo -n "$1" | tr '_-' '/+' | openssl enc -d -nosalt -aes-256-cbc -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" -a -A
 }
 
 # check local archives for bitrot by calculating SHA256 sum and comparing against SHA256 hash calculated during creation
@@ -62,7 +62,7 @@ function localVerify {
     cd "$LOCAL"/ >/dev/null
     sha256sum -c --quiet SHA256.txt
     cd - >/dev/null
-    # sha256sum will have aborted this script otherwise (set -e) if there has been an error
+    # sha256sum will have aborted this script otherwise (set -e)
     echo "SUCCESS: local verification did not detect errors"
 }
 
@@ -134,7 +134,7 @@ function add {
 function cloudsync {
     aws s3api list-objects --bucket "$BUCKET" > "$LOCAL"/list-objects.txt
     getPassword
-    cat "$LOCAL"/ETAGS.txt | while read etag name; do
+    cat "$LOCAL"/ETAGS.txt | tail -n20 | while read etag name; do
         if [[ ! "$etag" =~ ^([0-9a-f]{32,32})(-[0-9a-f]{1,5})?$ ]]; then echo "FATAL ERROR: etag $etag invalid!"; exit 1; fi
         if [[ ! -s "$LOCAL/$name" ]]; then echo "FATAL ERROR: file $LOCAL/$name invalid!"; exit 1; fi
         filename=$(basename "$name")
@@ -175,7 +175,7 @@ function list {
     name="${1%%.tar.xz.enc}"
     name="${name##$LOCAL\/$FOLDER/}"
     if [ ! -f "$LOCAL/$FOLDER/$name.tar.xz.enc" ]; then echo "FATAL ERROR: file $LOCAL/$FOLDER/$name.tar.xz.enc does not exist!"; exit 1; fi
-
+ 
     getPassword
     cat "$LOCAL/$FOLDER/$name.tar.xz.enc" | openssl enc -d -salt -aes-256-ctr -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" | unxz | tar tv
 }
@@ -185,7 +185,7 @@ function unpack {
     name="${1%%.tar.xz.enc}"
     name="${name##$LOCAL\/$FOLDER/}"
     if [ ! -f "$LOCAL/$FOLDER/$name.tar.xz.enc" ]; then echo "FATAL ERROR: file $LOCAL/$FOLDER/$name.tar.xz.enc does not exist!"; exit 1; fi
-
+ 
     getPassword
     cd /tmp
     cat "$LOCAL/$FOLDER/$name.tar.xz.enc" | openssl enc -d -salt -aes-256-ctr -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" | unxz | tar xv
@@ -198,6 +198,32 @@ function list-all {
 		list "$i"
 	done
 }
+
+function checksum {
+    # check, if we can unpack something
+    name="${1%%.tar.xz.enc}"
+    name="${name##$LOCAL\/$FOLDER/}"
+    if [ ! -f "$LOCAL/$FOLDER/$name.tar.xz.enc" ]; then echo "FATAL ERROR: file $LOCAL/$FOLDER/$name.tar.xz.enc does not exist!"; exit 1; fi
+ 
+    getPassword
+    cat "$LOCAL/$FOLDER/$name.tar.xz.enc" | openssl enc -d -salt -aes-256-ctr -pbkdf2 -iter "$ITERATIONS" -pass pass:"$pass" | tar xJv --to-command=sha256sum | while read -r i; do
+	if [[ "$i" =~ ^[0-9a-z]{64}\ \ \-$ ]]; then
+		h="${i:0:64}"
+		echo "$h $f"
+	else
+		f="$i"
+	fi
+    done
+}
+
+
+function checksum-all {
+	cd "$LOCAL/$FOLDER/"
+	for i in *.tar.xz.enc; do
+		checksum "$i"
+	done
+}
+
 
 function usage {
     echo "./awsbackup.sh - Please use one of the following options:"
@@ -218,8 +244,6 @@ function usage {
     echo "     - decrypt and unpack the archive to /tmp/"
     echo "   list 1999-01-XX_Pictures_Vacation"
     echo "     - decrypt and list contents"
-    echo "   list-all"
-    echo "     - decrypt and list contents of all archives"
     exit 1
 }
 
@@ -232,6 +256,8 @@ remove-password) rm -vf "$PASSWORD_LOCATION" ;;
 unpack) unpack "$2" ;;
 list) list "$2" ;;
 list-all) list-all ;;
+checksum) checksum "$2" ;;
+checksum-all) checksum-all ;;
 *) usage ;;
 esac
 
